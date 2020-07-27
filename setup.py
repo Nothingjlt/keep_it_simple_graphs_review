@@ -8,6 +8,6 @@ setup(name='linear_gae',
                         'numpy',
                         'scikit-learn',
                         'scipy==1.*',
-                        'tensorflow==1.*'],
+                        'tensorflow-gpu==1.*'],
       package_data={'linear_gae': ['README.md']},
       packages=find_packages())
