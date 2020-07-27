@@ -11,6 +11,8 @@ import os
 import scipy.sparse as sp
 import tensorflow as tf
 import time
+import networkx as nx
+from pandas import read_csv
 
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 #tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
@@ -30,6 +32,17 @@ flags.DEFINE_string('dataset', 'cora', 'Name of the graph dataset')
 
 We provide the preprocessed versions of these datasets, coming from the
 tkipf/gae repository. Please check the LINQS website for raw versions.
+'''
+
+flags.DEFINE_string('dataset_labels', '<full_path_to_dataset_labels_file>', 'path to dataset labels')
+''' The full path to dataset labels file
+format should be a list of labels
+'''
+
+flags.DEFINE_boolean('features_and_labels', False, 'path to dataset labels')
+''' If true the dataset_labels and dataset fields change their meanings
+dataset_labels becomes a list of nodes, features and labels
+dataset is an edge list
 '''
 
 # Select machine learning task to perform on graph
@@ -115,13 +128,84 @@ if FLAGS.kcore:
     mean_core_size = []
 mean_time = []
 
+
+def load_data2(dataset_filename):
+    """ Load datasets from KONECT data sets
+    :param dataset_filename: path to KONECT format edge list file.
+    :return: n*n sparse adjacency matrix and n*f node features matrix
+    """
+    edgelist = open(dataset_filename, 'r').read().splitlines()
+    num_of_header_lines = 0
+    for edge in edgelist:
+        if edge.startswith('%'):
+            num_of_header_lines += 1
+        else:
+            break
+    graph = nx.parse_edgelist(edgelist[num_of_header_lines:])
+
+    data_features = sp.eye(len(graph.nodes()))
+    data_adj = nx.adjacency_matrix(graph)
+    return data_adj, data_features
+
+
+def load_label2(dataset_label_filename):
+    """ Load node-level labels from KONECT datasets
+    :param dataset_label_filename: path to KONECT format labels file.
+    :return: n-dim array of node labels (used for clustering)
+    """
+    labels_list = open(dataset_label_filename, 'r').read().splitlines()
+
+    label_names, data_labels = np.unique(labels_list, return_inverse=True)
+
+    return data_labels
+
+
+def load_data_label(edges_filename, labels_and_features_filename):
+    """Load node-level data and labels from KONECT datasets
+
+    :param edges_filename: a file containing the edges of the graph
+    :param labels_and_features_filename: a file containing labels and features of graph nodes
+    :return: a tuple of n*n sparse adjacency matrix, n*f node features matrix, n-dim array of node labels
+    """
+    edges = open(edges_filename, 'r').read().splitlines()
+    nodes_features_labels = read_csv(labels_and_features_filename, delimiter='\t', header=None)
+
+    nodes = np.array(nodes_features_labels.iloc[:, 0])
+    data_labels = np.array(nodes_features_labels.iloc[:, -1])
+    data_features = sp.csr_matrix(nodes_features_labels.iloc[:, 1:-1])
+
+    data_names, data_labels_num = np.unique(data_labels, return_inverse=True)
+
+    graph = nx.Graph()
+    graph.add_nodes_from(nodes)
+    graph.add_edges_from(map(lambda x: x.split(' '), edges))
+
+    assert (data_features.shape[0] == len(nodes) and len(data_labels_num) == len(nodes))
+
+    adj_mat = nx.adjacency_matrix(graph)
+
+    assert (data_features.shape[0] == adj_mat.shape[0])
+
+    return adj_mat, data_features, data_labels_num
+
+
 # Load graph dataset
 if FLAGS.verbose:
     print("Loading data...")
-adj_init, features_init = load_data(FLAGS.dataset)
-# Load ground-truth labels for node clustering task
-if FLAGS.task == 'node_clustering':
-    labels = load_label(FLAGS.dataset)
+
+
+if FLAGS.dataset in ['cora', 'citeseer', 'pubmed']:
+    adj_init, features_init = load_data(FLAGS.dataset)
+    # Load ground-truth labels for node clustering task
+    if FLAGS.task == 'node_clustering':
+        labels = load_label(FLAGS.dataset)
+else:
+    if FLAGS.features_and_labels:
+        adj_init, features_init, labels = load_data_label(FLAGS.dataset, FLAGS.dataset_labels)
+    else:
+        adj_init, features_init = load_data2(FLAGS.dataset)
+        if FLAGS.task == 'node_clustering':
+            labels = load_label2(FLAGS.dataset_labels)
 
 # The entire training+test process is repeated FLAGS.nb_run times
 for i in range(FLAGS.nb_run):
@@ -233,7 +317,9 @@ for i in range(FLAGS.nb_run):
     adj_label = sparse_to_tuple(adj + sp.eye(adj.shape[0]))
 
     # Initialize TF session
-    sess = tf.Session()
+    config = tf.ConfigProto()
+    config.gpu_options.allow_growth = True
+    sess = tf.Session(config=config)
     sess.run(tf.global_variables_initializer())
 
     # Model training
